@@ -6,7 +6,7 @@ import path from 'path';
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   // Create HTTP server
   const server = createServer(app);
@@ -44,8 +44,15 @@ async function startServer() {
       }
     });
 
-    poWs.on('close', () => clientWs.close());
-    clientWs.on('close', () => poWs.close());
+    poWs.on('close', () => {
+      console.log('PO WS closed');
+      clientWs.close();
+    });
+    
+    clientWs.on('close', () => {
+      console.log('Client WS closed');
+      poWs.close();
+    });
 
     poWs.on('error', (err) => {
       console.error('PO proxy error:', err);
@@ -79,7 +86,7 @@ async function startServer() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
 }
 

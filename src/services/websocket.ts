@@ -30,6 +30,7 @@ class WebSocketService {
   public onConnect?: () => void;
   public onDisconnect?: () => void;
   public onCandle?: (asset: string, candle: Candle) => void;
+  public onCandlesBatch?: (asset: string, candles: Candle[]) => void;
   public onAssetList?: (assets: string[]) => void;
 
   private pingInterval: any;
@@ -38,6 +39,7 @@ class WebSocketService {
   
   private reconnectAttempts = 0;
   private maxReconnectAttemptsBeforeReFetch = 3;
+  private reconnectTimeout: any;
 
   constructor() {}
 
@@ -57,7 +59,13 @@ class WebSocketService {
   }
 
   async connect() {
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
     if (this.ws) {
+      this.ws.onclose = null; // Prevent triggering reconnect loop
+      this.ws.onerror = null;
       this.ws.close();
     }
     
@@ -67,7 +75,7 @@ class WebSocketService {
        this.reconnectAttempts = 0;
     }
     
-    console.log(`Connecting to WS Proxy... (Attempt ${this.reconnectAttempts})`);
+    console.log(`Connecting to WS... (Attempt ${this.reconnectAttempts})`);
     this.ws = new WebSocket(this.proxyUrl);
 
     this.ws.onopen = () => {
@@ -132,7 +140,7 @@ class WebSocketService {
       // Exponential backoff capped at 15 seconds
       const timeout = Math.min(this.reconnectAttempts * 2000, 15000);
       console.log(`Reconnecting in ${timeout}ms...`);
-      setTimeout(() => this.connect(), timeout);
+      this.reconnectTimeout = setTimeout(() => this.connect(), timeout);
     };
     
     this.ws.onerror = (e) => {
@@ -146,36 +154,59 @@ class WebSocketService {
       this.isConnected = true;
       this.onConnect?.();
       this.subscribeAll();
-    } else if (event === 'updateStream') {
-       // Assuming data shape: { asset: string, data: [{ time, open, high, low, close, volume }] }
-       // Wait, PO market structure might vary. We will parse it broadly.
-       if(data && data.asset && data.data && data.data.length > 0) {
-           const c = data.data[data.data.length - 1]; // current
-           this.onCandle?.(data.asset, {
-              time: c.time,
-              open: c.open,
-              high: c.high,
-              low: c.low,
-              close: c.close,
-              volume: c.volume
-           });
-       } else if (Array.isArray(data) && data.length > 0) {
-         // Alternative format: [ 'EURUSD_OTC', time, open, close, high, low ]
-         const asset = data[0];
-         if (typeof asset === 'string' && this.subscriptions.includes(asset)) {
-            // Rough heuristic mapping
-            try {
-              const candle = {
-                time: data[1],
-                open: data[2],
-                close: data[3],
-                high: data[4],
-                low: data[5]
-              };
-              this.onCandle?.(asset, candle);
-            } catch(e) {}
+    } else {
+      // Log other events to inspect PO Market data format
+      if (event.includes('update') || Array.isArray(data)) {
+        console.log(`WS Event: ${event}`, data);
+      }
+      
+      if (event === 'updateStream' || event === 'updateHistoryNew') {
+         if(data && data.data && data.data.length > 0) {
+             const asset = data.asset;
+             if (!asset) return; // sometimes it might be missing
+             
+             // If historical data payload
+             if (data.data.length > 1 && this.onCandlesBatch) {
+               const batch = data.data.map((c: any) => ({
+                 time: c.time,
+                 open: c.open,
+                 high: c.high,
+                 low: c.low,
+                 close: c.close,
+                 volume: c.volume || 0
+               }));
+               this.onCandlesBatch(asset, batch);
+             } else {
+               data.data.forEach((c: any) => {
+                 this.onCandle?.(asset, {
+                   time: c.time,
+                   open: c.open,
+                   high: c.high,
+                   low: c.low,
+                   close: c.close,
+                   volume: c.volume || 0
+                 });
+               });
+             }
          }
-       }
+      } else if (event === 'updateStream') {
+         // Alternative format fallback
+         if (Array.isArray(data) && data.length > 0) {
+           const asset = data[0];
+           if (typeof asset === 'string' && this.subscriptions.includes(asset)) {
+              try {
+                const candle = {
+                  time: data[1],
+                  open: data[2],
+                  close: data[3],
+                  high: data[4],
+                  low: data[5]
+                };
+                this.onCandle?.(asset, candle);
+              } catch(e) {}
+           }
+         }
+      }
     }
   }
 

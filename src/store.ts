@@ -4,6 +4,17 @@ import { MLService } from './services/ml';
 import { DEFAULT_ASSETS, wsService } from './services/websocket';
 import { saveCandlesLocal, getCandlesLocal } from './services/db';
 
+const saveTimeouts: Record<string, any> = {};
+
+function throttledSave(asset: string, candles: Candle[]) {
+  if (saveTimeouts[asset]) {
+    clearTimeout(saveTimeouts[asset]);
+  }
+  saveTimeouts[asset] = setTimeout(() => {
+    saveCandlesLocal(asset, candles);
+  }, 2000); // Save every 2 seconds max
+}
+
 type AppState = {
   isWsConnected: boolean;
   selectedAsset: string;
@@ -35,6 +46,7 @@ type AppState = {
   setSelectedAsset: (asset: string) => void;
   setSelectedTimeframe: (tf: string) => void;
   processNewCandle: (asset: string, candle: Candle) => void;
+  processNewCandlesBatch: (asset: string, candles: Candle[]) => void;
   generateMockCandle: (asset: string) => void; // for fallback
   generateMockSignal: (asset: string) => void;
 };
@@ -71,6 +83,10 @@ export const useStore = create<AppState>((set, get) => ({
         lastCandleTime = Date.now();
         get().processNewCandle(asset, candle);
       };
+      wsService.onCandlesBatch = (asset, batch) => {
+        lastCandleTime = Date.now();
+        get().processNewCandlesBatch(asset, batch);
+      };
       
       // 3. Connect
       wsService.setSubscriptions(DEFAULT_ASSETS.map(a => a.name));
@@ -80,14 +96,13 @@ export const useStore = create<AppState>((set, get) => ({
       set({ isWsConnected: false });
     }
     
-    // Auto-fallback mock data loop: ensures chart is always moving
-    // If we haven't received a candle in 5 seconds (or if ws failed), pump mock data.
-    setInterval(() => {
+    // Wait for real data, disabled auto mock loop
+    /* setInterval(() => {
       const { selectedAsset, isWsConnected } = get();
       if (!isWsConnected || Date.now() - lastCandleTime > 5000) {
         get().generateMockCandle(selectedAsset);
       }
-    }, 1000);
+    }, 1000); */
     
     // Refresh token every 2 hours
     setInterval(async () => {
@@ -132,7 +147,7 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     // Save async
-    saveCandlesLocal(asset, newCandles);
+    throttledSave(asset, newCandles);
 
     // Update asset list stats
     let change = 0;
@@ -164,7 +179,6 @@ export const useStore = create<AppState>((set, get) => ({
       const model = mlModels[asset];
       if (model) {
         // Evaluate Rules
-        // Using mock rules score for now based on recent candles
         const rsiCondition = newCandles[newCandles.length-1]?.close < newCandles[newCandles.length-5]?.close;
         const macdCondition = true;
         
@@ -197,6 +211,46 @@ export const useStore = create<AppState>((set, get) => ({
         });
       }
     }
+  },
+
+  processNewCandlesBatch: (asset, batch) => {
+    const { candles, assets, mlModels } = get();
+    const existing = candles[asset] || [];
+    
+    // Simple approach: just concatenate and dedup later, or assume they are sorted
+    let newCandles = [...existing];
+    for (const candle of batch) {
+      const last = newCandles[newCandles.length - 1];
+      if (last && last.time === candle.time) {
+        newCandles[newCandles.length - 1] = candle;
+      } else {
+        newCandles.push(candle);
+      }
+    }
+    
+    // Maintain max 5000
+    if (newCandles.length > 5000) {
+      newCandles = newCandles.slice(newCandles.length - 5000);
+    }
+
+    // Save async
+    throttledSave(asset, newCandles);
+
+    // Update asset list stats
+    let change = 0;
+    const lastObj = newCandles[newCandles.length - 1];
+    if (newCandles.length > 1 && lastObj) {
+      const prev = newCandles[newCandles.length - 2];
+      change = ((lastObj.close - prev.close) / prev.close) * 100;
+    }
+    const updatedAssets = assets.map(a => 
+      a.name === asset && lastObj ? { ...a, price: lastObj.close, change } : a
+    );
+
+    set({ 
+      candles: { ...candles, [asset]: newCandles },
+      assets: updatedAssets
+    });
   },
 
   generateMockCandle: (asset) => {

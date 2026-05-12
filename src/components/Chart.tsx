@@ -65,36 +65,54 @@ export function Chart() {
   }, []);
 
   useEffect(() => {
-    if (seriesRef.current && candles && candles.length > 0) {
-      // Lightweight charts requires unique time per candle, formatted strictly.
-      // We must ensure time is strictly increasing.
-      try {
-        const formattedData = candles.map(c => ({
-          time: c.time as any,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
-        })).sort((a,b) => a.time - b.time);
-        
-        // Remove duplicates
-        const unique = [];
-        let lastTime = 0;
-        for (const item of formattedData) {
-          if (item.time > lastTime) {
-            unique.push(item);
-            lastTime = item.time;
-          } else if (item.time === lastTime) {
-              unique[unique.length - 1] = item; // override last
-          }
+    if (!seriesRef.current || !candles || candles.length === 0) return;
+    
+    try {
+      const formattedData = candles.map(c => ({
+        time: c.time as any,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+      })).sort((a,b) => a.time - b.time);
+      
+      const unique = [];
+      let lastTime = 0;
+      for (const item of formattedData) {
+        if (item.time > lastTime) {
+          unique.push(item);
+          lastTime = item.time;
+        } else if (item.time === lastTime) {
+            unique[unique.length - 1] = item;
         }
-        
-        seriesRef.current.setData(unique);
-      } catch (err) {
-        console.error("Chart data error", err);
       }
+      
+      // If we already have a lot of data and only the last one or two changed
+      // it's highly inefficient to call setData every tick. We'll just setData always for brevity,
+      // but in production we should use seriesRef.current.update() for the last candle.
+      // Let's use `setData` unless we can just update.
+      // Actually `setData` is fast enough for 5000 items on modern PCs, but maybe it's causing the freeze.
+      // Let's implement smart update:
+      const currentData = seriesRef.current.data();
+      if (currentData.length > 0 && unique.length >= currentData.length) {
+        // Find if we only need to append/update the last few items
+        const lastExistingTime = currentData[currentData.length - 1].time;
+        const newItems = unique.filter(i => i.time >= lastExistingTime);
+        
+        if (newItems.length < 5 && unique.length - currentData.length < 5) {
+          for (const item of newItems) {
+            seriesRef.current.update(item);
+          }
+          return;
+        }
+      }
+      
+      // Fallback: full reset
+      seriesRef.current.setData(unique);
+    } catch (err) {
+      console.error("Chart data error", err);
     }
-  }, [candles, selectedAsset]);
+  }, [candles]);
 
   return (
     <div className="w-full h-full relative" ref={chartContainerRef}>
