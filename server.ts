@@ -26,8 +26,17 @@ async function startServer() {
       }
     });
 
+    const messageQueue: any[] = [];
+
     poWs.on('open', () => {
       console.log('Proxy connected to PO WS');
+      // Send queued messages
+      while (messageQueue.length > 0) {
+        const msg = messageQueue.shift();
+        if (poWs.readyState === WebSocket.OPEN) {
+          poWs.send(msg);
+        }
+      }
     });
 
     // PO -> Client
@@ -41,27 +50,40 @@ async function startServer() {
     clientWs.on('message', (data) => {
       if (poWs.readyState === WebSocket.OPEN) {
         poWs.send(data);
+      } else if (poWs.readyState === WebSocket.CONNECTING) {
+        messageQueue.push(data);
       }
     });
 
     poWs.on('close', () => {
       console.log('PO WS closed');
-      clientWs.close();
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close();
+      }
     });
     
     clientWs.on('close', () => {
       console.log('Client WS closed');
-      poWs.close();
+      if (poWs.readyState === WebSocket.OPEN || poWs.readyState === WebSocket.CONNECTING) {
+        poWs.close();
+      }
     });
 
-    poWs.on('error', (err) => {
+    poWs.on('error', (err: Error) => {
+      if (err.message && err.message.includes('WebSocket was closed before the connection was established')) {
+        return; // Ignore this expected error if client disconnects early
+      }
       console.error('PO proxy error:', err);
-      clientWs.close();
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close();
+      }
     });
     
     clientWs.on('error', (err) => {
       console.error('Client WS error:', err);
-      poWs.close();
+      if (poWs.readyState === WebSocket.OPEN || poWs.readyState === WebSocket.CONNECTING) {
+        poWs.close();
+      }
     });
   });
 
@@ -86,7 +108,7 @@ async function startServer() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
